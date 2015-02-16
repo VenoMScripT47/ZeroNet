@@ -1,4 +1,9 @@
-import socket
+import gevent
+from gevent import socket
+from gevent import monkey
+
+monkey.patch_socket()
+
 import re
 import urllib2
 import httplib
@@ -9,8 +14,9 @@ from xml.dom.minidom import parseString
 
 # General TODOs:
 # Handle 0 or >1 IGDs
-# Format the SOAP AddPortEntry message correctly (remove spaces/whitespace)
-# Find robust way to find own ip
+# Add project specific formatting ie. spaces2tabs
+
+remove_whitespace = re.compile(r'>\s*<')
 
 
 def _m_search_ssdp():
@@ -30,8 +36,8 @@ def _m_search_ssdp():
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.sendto(ssdp_request, ('239.255.255.250', 1900))
+    sock.settimeout(5)
 
-    # TODO: add timeout
     return sock.recv(1024)
 
 
@@ -54,15 +60,14 @@ def _retrieve_igd_profile(url):
     """
     Retrieve the device's UPnP profile.
     """
-    # TODO: add exception handling
     return urllib2.urlopen(url.geturl()).read()
 
 
-def __get_node_value(node):
+def _node_val(node):
     """ 
     Get the text value of the first child text node of a node.
     """
-    return node.childeNodes[0].data
+    return node.childNodes[0].data
 
 
 def _parse_igd_profile(profile_xml):
@@ -71,18 +76,27 @@ def _parse_igd_profile(profile_xml):
     WANIPConnection or WANPPPConnection and return
     the value found as well as the 'controlURL'.
     """
-    # TODO: return upnp schema as well
     dom = parseString(profile_xml)
 
     service_types = dom.getElementsByTagName('serviceType')
     for service in service_types:
-        if __get_node_value(service).find('WANIPConnection') > 0 or \
-           __get_node_value(service).find('WANPPPConnection') > 0:
+        if _node_val(service).find('WANIPConnection') > 0 or \
+           _node_val(service).find('WANPPPConnection') > 0:
             control_url = service.parentNode.getElementsByTagName(
                 'controlURL'
             )[0].childNodes[0].data
+            upnp_schema = _node_val(service).split(':')[-2]
+            return control_url, upnp_schema
 
-    return control_url, upnp_schema
+    return False
+
+
+def _get_local_ip():
+    # not working consistently
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.connect(('<broadcast>', 0))
+    return s.getsockname()[0]
 
 
 def _create_soap_message(port, description="UPnPPunch", protocol="TCP",
@@ -90,8 +104,7 @@ def _create_soap_message(port, description="UPnPPunch", protocol="TCP",
     """
     Build a SOAP AddPortMapping message.
     """
-    # TODO: get current ip
-    current_ip = '192.168.0.2'
+    current_ip = _get_local_ip()
 
     soap_message = """<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -113,7 +126,22 @@ def _create_soap_message(port, description="UPnPPunch", protocol="TCP",
                         description=description,
                         upnp_schema=upnp_schema)
 
-    return soap_message
+    return remove_whitespace.sub('><', soap_message)
+
+
+def _parse_for_errors(soap_response):
+    if soap_response.status == 500:
+        err_dom = parseString(soap_response.read())
+        err_code = _node_val(err_dom.getElementsByTagName('errorCode')[0])
+        err_msg = _node_val(
+            err_dom.getElementsByTagName('errorDescription')[0]
+        )
+        raise Exception(
+            'SOAP request error: {0} - {1}'.format(err_code, err_msg)
+        )
+        return False
+    else:
+        return True
 
 
 def _send_soap_request(location, upnp_schema, control_url, soap_message):
@@ -130,22 +158,41 @@ def _send_soap_request(location, upnp_schema, control_url, soap_message):
     conn = httplib.HTTPConnection(location.hostname, location.port)
     conn.request('POST', control_url, soap_message, headers)
 
-    response_body = conn.getresponse().read()
+    response = conn.getresponse()
+    conn.close()
 
-    return response_body
+    return _parse_for_errors(response)
 
 
 def open_port(port=15441):
     """
     Attempt to forward a port using UPnP.
     """
+
     location = _retrieve_location_from_ssdp(_m_search_ssdp())
-    control_url, upnp_schema = _parse_igd_profile(
+
+    if not location:
+        return False
+
+    parsed = _parse_igd_profile(
         _retrieve_igd_profile(location)
     )
 
-    for protocol in ["TCP", "UDP"]:
-        message = _create_soap_message(port, protocol, upnp_schema)
-        # TODO: gevent this
-        _send_soap_request(location, upnp_schema, control_url, message)
-        # TODO: handle error code in response
+    if not parsed:
+        return False
+
+    control_url, upnp_schema = parsed
+
+    soap_messages = [_create_soap_message(port, 'UPnPYo', proto, upnp_schema)
+                     for proto in ['TCP', 'UDP']]
+
+    requests = [gevent.spawn(
+        _send_soap_request, location, upnp_schema, control_url, message
+    ) for message in soap_messages]
+
+    gevent.joinall(requests, timeout=3)
+
+    if all(requests):
+        return True
+    else:
+        return False
