@@ -46,13 +46,12 @@ class FileServer:
 			if self.testOpenport(port)["result"] == True:
 				return True # Port already opened
 
-		#if config.upnpc: # If we have upnpc util, try to use it to puch port on our router
-		self.log.info("Try to open port using UpnpPunch...")
+		self.log.info("Trying to open port using UpnpPunch...")
 		try:
-			upnp_punch = UpnpPunch.open_port(self.port)
+			upnp_punch = UpnpPunch.open_port(self.port, 'ZeroNet')
 			upnp_punch = True
 		except Exception, err:
-			self.log.error("Upnpc run error: %s" % Debug.formatException(err))
+			self.log.error("UpnpPunch run error: %s" % Debug.formatException(err))
 			upnp_punch = False
 
 		if upnp_punch and self.testOpenport(port)["result"] == True:

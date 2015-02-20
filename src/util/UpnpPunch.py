@@ -92,10 +92,10 @@ def _parse_igd_profile(profile_xml):
 
 
 def _get_local_ip():
-    # not working consistently
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    s.connect(('<broadcast>', 0))
+    # not using <broadcast> because gevents getaddrinfo doesn't like that
+    s.connect(('239.255.255.250', 0))
     return s.getsockname()[0]
 
 
@@ -164,7 +164,7 @@ def _send_soap_request(location, upnp_schema, control_url, soap_message):
     return _parse_for_errors(response)
 
 
-def open_port(port=15441):
+def open_port(port=15441, desc="UpnpPunch"):
     """
     Attempt to forward a port using UPnP.
     """
@@ -183,7 +183,7 @@ def open_port(port=15441):
 
     control_url, upnp_schema = parsed
 
-    soap_messages = [_create_soap_message(port, 'UPnPYo', proto, upnp_schema)
+    soap_messages = [_create_soap_message(port, desc, proto, upnp_schema)
                      for proto in ['TCP', 'UDP']]
 
     requests = [gevent.spawn(
